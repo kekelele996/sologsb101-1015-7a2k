@@ -2,7 +2,7 @@
 /**
  * /measures 复壮措施台账
  * 新增 / 编辑 / 删除措施，按类型与实施状态筛选，支持行内草稿与批量改状态；
- * 状态改为「已完成」时回写古树最近复壮日期。
+ * 措施变更后，古树最近复壮日期按现存「已完成」措施自动重算。
  * 消费模型：Measure、Tree；复用组件：<FilterBar>、<EmptyPanel>、<StatBadge>
  */
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -411,7 +411,7 @@ function handleFilterChange(key: string, value: string): void {
           type="info"
           show-icon
           :closable="false"
-          title="状态选择「已完成」时，会自动把该古树的最近复壮日期回写为上面的实施日期，并进入复评待办。"
+          title="最近复壮日期按该古树现存「已完成」措施的最新实施日期自动同步：改为已完成即纳入计算，退回实施中 / 计划或删除会重算，一条已完成都不剩时回到「未登记」。"
         />
       </el-form>
       <template #footer>

@@ -1,8 +1,9 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
  * - 数据库名：gbheritagetree
- * - 含数据结构版本号与 v1 → v2 升级迁移逻辑（升级时按 version().stores() 补齐索引）
+ * - 含数据结构版本号与 v1 → v2 → v3 升级迁移逻辑（升级时按 version().stores() 补齐索引）
  * - 提供各表增删改查、整库快照导入导出与重置
+ * - 古树「最近复壮日期」为派生当前值：每次措施增删改后按该树现存「已完成」措施重算
  * 纯前端应用：不依赖任何后端服务或外部接口。
  */
 import Dexie, { type Table } from 'dexie'
@@ -18,7 +19,7 @@ import { seedDatabase } from './seed'
 export const DB_NAME = 'gbheritagetree'
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2
+export const DB_SCHEMA_VERSION = 3
 
 /** 数据行结构修订号 */
 export const ROW_REVISION = 2
@@ -82,6 +83,20 @@ class HeritageTreeDatabase extends Dexie {
           if (typeof row.checkCycleMon !== 'number') row.checkCycleMon = 12
         })
       })
+
+    // ---------- v3：修复「最近复壮日期」只增不退的历史脏数据 ----------
+    // 索引结构不变，按各古树现存「已完成」措施重算 lastMeasureDate。
+    this.version(3).upgrade(async (tx) => {
+      const latest = new Map<string, string>()
+      await tx.table('measures').toCollection().each((row: Measure) => {
+        if (row.state !== '已完成') return
+        const current = latest.get(row.treeId) ?? ''
+        if (row.date > current) latest.set(row.treeId, row.date)
+      })
+      await tx.table('trees').toCollection().modify((row: Record<string, unknown>) => {
+        row.lastMeasureDate = latest.get(row.id as string) ?? ''
+      })
+    })
   }
 }
 
@@ -167,33 +182,66 @@ export async function listMeasuresByTree(treeId: string): Promise<Measure[]> {
 }
 
 /**
+ * 按某株古树现存「已完成」措施重算其最近复壮日期：
+ * 取所有已完成措施中最新的实施日期；一条都没有时落回空串（页面显示「未登记」）。
+ * 与现值相同则跳过写入——只改材料 / 负责人的编辑不会惊动古树行。
+ * 同一天存在多条已完成措施时天然共存，重算结果仍是那一天，互不顶掉。
+ */
+export async function syncTreeLastMeasureDate(treeId: string): Promise<void> {
+  const done = await db.measures
+    .where('treeId')
+    .equals(treeId)
+    .filter((row) => row.state === '已完成')
+    .toArray()
+  const latest = done.reduce((acc, row) => (row.date > acc ? row.date : acc), '')
+  const tree = await db.trees.get(treeId)
+  if (!tree) return
+  if (tree.lastMeasureDate === latest) return
+  await db.trees.update(treeId, { lastMeasureDate: latest, updatedAt: nowIso() })
+}
+
+/**
  * 写入复壮措施。
- * 措施状态为「已完成」时，回写古树的最近复壮日期（仅当本次日期更新时）。
+ * 写入后按现存「已完成」措施重算所属古树的最近复壮日期；
+ * 若本次编辑把措施改派到别的古树，新旧两株都会重算。
  */
 export async function putMeasure(row: Measure): Promise<void> {
   await db.transaction('rw', db.trees, db.measures, async () => {
+    const before = await db.measures.get(row.id)
     await db.measures.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION })
-    if (row.state !== '已完成') return
-    const tree = await db.trees.get(row.treeId)
-    if (!tree) return
-    if (tree.lastMeasureDate >= row.date) return
-    await db.trees.update(tree.id, { lastMeasureDate: row.date, updatedAt: nowIso() })
+    const affected = new Set<string>([row.treeId])
+    if (before && before.treeId !== row.treeId) affected.add(before.treeId)
+    for (const treeId of affected) {
+      await syncTreeLastMeasureDate(treeId)
+    }
   })
 }
 
+/** 删除复壮措施，并按剩余「已完成」措施重算所属古树的最近复壮日期 */
 export async function removeMeasure(id: string): Promise<void> {
-  await db.measures.delete(id)
+  await db.transaction('rw', db.trees, db.measures, async () => {
+    const before = await db.measures.get(id)
+    await db.measures.delete(id)
+    if (before) await syncTreeLastMeasureDate(before.treeId)
+  })
 }
 
-/** 批量修改措施状态；改为「已完成」时同步回写古树最近复壮日期 */
+/** 批量修改实施状态；每株受影响古树只按现存「已完成」措施重算一次最近复壮日期 */
 export async function batchSetMeasureState(ids: string[], state: MeasureState): Promise<number> {
   if (ids.length === 0) return 0
-  const rows = await db.measures.bulkGet(ids)
-  const list = rows.filter((row): row is Measure => row !== undefined)
-  for (const row of list) {
-    await putMeasure({ ...row, state })
-  }
-  return list.length
+  return db.transaction('rw', db.trees, db.measures, async () => {
+    const rows = await db.measures.bulkGet(ids)
+    const list = rows.filter((row): row is Measure => row !== undefined)
+    const stamp = nowIso()
+    await db.measures.bulkPut(
+      list.map((row) => ({ ...row, state, updatedAt: stamp, revision: ROW_REVISION }))
+    )
+    const affected = new Set<string>(list.map((row) => row.treeId))
+    for (const treeId of affected) {
+      await syncTreeLastMeasureDate(treeId)
+    }
+    return list.length
+  })
 }
 
 /* ------------------------------ 加固件 ------------------------------ */
@@ -280,6 +328,10 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.measures.bulkPut(snapshot.measures.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.supports.bulkPut(snapshot.supports.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.reviews.bulkPut(snapshot.reviews.map((row) => ({ ...row, revision: ROW_REVISION })))
+    // 存档里的 lastMeasureDate 可能是只增不退的旧值，统一按现存「已完成」措施重算
+    for (const tree of snapshot.trees) {
+      await syncTreeLastMeasureDate(tree.id)
+    }
   })
 }
 
