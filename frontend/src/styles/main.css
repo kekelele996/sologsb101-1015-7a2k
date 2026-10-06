@@ -1,0 +1,51 @@
+/* 古树名木复壮养护档案 · 全局样式
+   松柏墨绿 + 老树皮暖褐，浅米底衬托长期档案的沉稳感。 */
+
+:root {
+  --gb-bg: #f7f5ee;
+  --gb-surface: #ffffff;
+  --gb-ink: #2f2a24;
+  --gb-primary: #4a5a30;
+  --gb-accent: #8a6b3a;
+  --gb-line: rgba(74, 90, 48, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--gb-bg);
+  color: var(--gb-ink);
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Source Han Sans SC', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  position: relative;
+}
+
+.el-table .cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.el-card {
+  border-radius: 10px;
+}
+
+.el-table .row-overdue td.el-table__cell {
+  background: #fdf3f2 !important;
+}
+
+@media (max-width: 900px) {
+  .app-main {
+    padding: 12px;
+  }
+}
