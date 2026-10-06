@@ -25,7 +25,10 @@ export interface Tree {
   location: string
   /** 管护单位 */
   owner: string
-  /** 最近一次复壮措施完成日期（措施完成时回写） */
+  /**
+   * 最近复壮日期（当前有效值）：该树现存「已完成」措施的最晚实施日期。
+   * 任何措施写入 / 状态流转 / 删除后在同一事务内就地重算；无已完成措施时为 ''（未登记）。
+   */
   lastMeasureDate: string
   createdAt: string
   updatedAt: string

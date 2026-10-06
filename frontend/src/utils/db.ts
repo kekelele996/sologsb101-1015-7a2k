@@ -18,7 +18,7 @@ import { seedDatabase } from './seed'
 export const DB_NAME = 'gbheritagetree'
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2
+export const DB_SCHEMA_VERSION = 3
 
 /** 数据行结构修订号 */
 export const ROW_REVISION = 2
@@ -43,7 +43,7 @@ class HeritageTreeDatabase extends Dexie {
     })
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         trees: 'id, code, species, protectLevel, ageYears, createdAt, updatedAt, owner',
         // 复合索引 [treeId+date]：按古树 + 日期快速取检查记录
@@ -82,6 +82,18 @@ class HeritageTreeDatabase extends Dexie {
           if (typeof row.checkCycleMon !== 'number') row.checkCycleMon = 12
         })
       })
+
+    // ---------- v3：按现存已完成措施重算各古树「最近复壮日期」（数据修复，无结构变化） ----------
+    // 旧版只在措施完成时单向推进日期，措施退回实施中 / 删除 / 改日期后古树字段会停在旧值，
+    // 这里统一按现存「已完成」措施的最晚实施日期重算，无已完成措施则回到未登记。
+    this.version(DB_SCHEMA_VERSION).upgrade(async (tx) => {
+      const measureTable = tx.table<Measure, string>('measures')
+      const treeTable = tx.table<Tree, string>('trees')
+      const measures = await measureTable.toArray()
+      await treeTable.toCollection().modify((tree: Tree) => {
+        tree.lastMeasureDate = latestDoneMeasureDate(measures, tree.id)
+      })
+    })
   }
 }
 
@@ -167,25 +179,65 @@ export async function listMeasuresByTree(treeId: string): Promise<Measure[]> {
 }
 
 /**
- * 写入复壮措施。
- * 措施状态为「已完成」时，回写古树的最近复壮日期（仅当本次日期更新时）。
+ * 纯函数：按某株古树现存「已完成」措施计算最近复壮日期（实施日期的最大值）。
+ * 没有任何已完成措施时返回 ''（未登记）。同一天多条措施取同一天，互不顶掉。
+ */
+export function latestDoneMeasureDate(measures: readonly Measure[], treeId: string): string {
+  let latest = ''
+  for (const row of measures) {
+    if (row.treeId !== treeId || row.state !== '已完成') continue
+    if (row.date > latest) latest = row.date
+  }
+  return latest
+}
+
+/**
+ * 就地重算古树的「最近复壮日期」，使其始终等于现存已完成措施的最晚实施日期。
+ * 重算值与现值一致时不写库，因此仅修改材料 / 负责人等不影响日期的编辑不会扰动该字段。
+ * 可在外层事务内调用（Dexie 会自动复用当前事务）。
+ */
+async function recomputeTreeLastMeasureDate(treeId: string, measures: Measure[]): Promise<void> {
+  const tree = await db.trees.get(treeId)
+  if (!tree) return
+  const next = latestDoneMeasureDate(measures, treeId)
+  if (next === tree.lastMeasureDate) return
+  await db.trees.update(treeId, { lastMeasureDate: next, updatedAt: nowIso() })
+}
+
+/**
+ * 写入复壮措施，并在同一事务内按现存「已完成」措施重算相关古树的最近复壮日期。
+ * 措施可能被改挂到另一株古树，因此旧归属与新归属两侧都要重算；
+ * 状态退回「计划 / 实施中」、改日期、删除等场景由此自动收敛，无需调用方关心。
  */
 export async function putMeasure(row: Measure): Promise<void> {
+  const previous = await db.measures.get(row.id)
+  const affectedTreeIds = [row.treeId, previous?.treeId].filter(
+    (id): id is string => id !== undefined
+  )
   await db.transaction('rw', db.trees, db.measures, async () => {
     await db.measures.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION })
-    if (row.state !== '已完成') return
-    const tree = await db.trees.get(row.treeId)
-    if (!tree) return
-    if (tree.lastMeasureDate >= row.date) return
-    await db.trees.update(tree.id, { lastMeasureDate: row.date, updatedAt: nowIso() })
+    const measures = await db.measures.toArray()
+    for (const treeId of new Set(affectedTreeIds)) {
+      await recomputeTreeLastMeasureDate(treeId, measures)
+    }
   })
 }
 
+/** 删除措施并重算其原属古树的最近复壮日期（可能是最后一条已完成措施 → 回到未登记） */
 export async function removeMeasure(id: string): Promise<void> {
-  await db.measures.delete(id)
+  const previous = await db.measures.get(id)
+  if (!previous) {
+    await db.measures.delete(id)
+    return
+  }
+  await db.transaction('rw', db.trees, db.measures, async () => {
+    await db.measures.delete(id)
+    const measures = await db.measures.where('treeId').equals(previous.treeId).toArray()
+    await recomputeTreeLastMeasureDate(previous.treeId, measures)
+  })
 }
 
-/** 批量修改措施状态；改为「已完成」时同步回写古树最近复壮日期 */
+/** 批量修改措施状态；每一条写入后都会在同一事务内重算相关古树最近复壮日期 */
 export async function batchSetMeasureState(ids: string[], state: MeasureState): Promise<number> {
   if (ids.length === 0) return 0
   const rows = await db.measures.bulkGet(ids)
@@ -280,6 +332,11 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.measures.bulkPut(snapshot.measures.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.supports.bulkPut(snapshot.supports.map((row) => ({ ...row, revision: ROW_REVISION })))
     await db.reviews.bulkPut(snapshot.reviews.map((row) => ({ ...row, revision: ROW_REVISION })))
+    // 存档里的古树日期可能已与措施脱节：按现存已完成措施就地重算，保证导入后各处同数
+    const measures = await db.measures.toArray()
+    await db.trees.toCollection().modify((tree: Tree) => {
+      tree.lastMeasureDate = latestDoneMeasureDate(measures, tree.id)
+    })
   })
 }
 

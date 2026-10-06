@@ -1,6 +1,6 @@
 /**
  * 复壮措施状态管理（Pinia）
- * 维护措施草稿、实施状态流转与批量操作；完成即回写古树最近复壮日期。
+ * 维护措施草稿、实施状态流转与批量操作；每次措施变动后按现存已完成措施重算古树最近复壮日期。
  */
 import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
@@ -100,7 +100,7 @@ export const useMeasureStore = defineStore('measure', () => {
     await putMeasure(row)
     revision.value += 1
     if (row.state === '已完成') {
-      lastMessage.value = '措施已登记为「已完成」，古树最近复壮日期已回写'
+      lastMessage.value = '措施已登记为「已完成」，古树最近复壮日期已按现存已完成措施重算'
     }
     return row
   }
@@ -137,7 +137,7 @@ export const useMeasureStore = defineStore('measure', () => {
     const next = flow[index + 1]
     await putMeasure({ ...existing, state: next })
     revision.value += 1
-    lastMessage.value = next === '已完成' ? '措施已完成，古树最近复壮日期已回写' : `措施状态已推进为「${next}」`
+    lastMessage.value = next === '已完成' ? '措施已完成，古树最近复壮日期已重算' : `措施状态已推进为「${next}」`
     return next
   }
 
@@ -147,7 +147,7 @@ export const useMeasureStore = defineStore('measure', () => {
     selectedIds.value = []
     revision.value += 1
     lastMessage.value = `已把 ${count} 条措施状态改为「${state}」`
-    // 回写古树日期后，同步刷新古树统计
+    // 古树最近复壮日期已在写入事务内重算，这里同步刷新古树统计
     await useTreeStore().refreshCounts()
     return count
   }

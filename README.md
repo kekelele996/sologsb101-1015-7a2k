@@ -42,7 +42,7 @@ docker compose up -d --build       # 改完代码后重新构建
 | 构建 | Vite 6 | 开发端口与宿主端口一致（22815） |
 | 路由 | Vue Router 4 | `createWebHistory` + 路由懒加载 |
 | 状态管理 | Pinia 2 | setup store，跨页状态集中在 store，页面只读 store |
-| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbheritagetree`，含 v1 → v2 升级迁移 |
+| 本地持久化 | Dexie 4（IndexedDB） | 库名 `gbheritagetree`，含 v1 → v3 升级迁移 |
 | 容器 | node:20-alpine → nginx:alpine | 多阶段构建，`chmod -R a+rX` 规避静态资源 403 |
 
 ---
@@ -100,12 +100,13 @@ sologsb101-1015/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbheritagetree`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移，`version(3)` 修复历史回写：
   * `surveys` 增加 `[treeId+date]` 复合索引、`measures` 增加 `operator` 索引、`supports` 增加 `lastCheckDate` 索引、`reviews` 增加 `trend` 索引；
   * 回填 `revision` / `createdAt` / `updatedAt`；
   * 为 `trees` 补齐 `lastMeasureDate`（最近复壮日期）回写字段；
   * 为 `reviews` 补齐 `followUp`（后续措施）字段；
-  * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值。
+  * 为 `supports` 补齐 `lastCheckDate` 与 `checkCycleMon` 缺省值；
+  * v3 无结构变化：逐树按现存「已完成」措施的最晚实施日期重算 `lastMeasureDate`，修复旧版单向回写在措施退回 / 删除后留下的陈旧日期。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
@@ -154,4 +155,4 @@ npm run preview      # 预览 dist 产物
 * **加固件超期**：`最近检查日期 + 检查周期（月）` 早于今天即为超期，列表自动高亮并在顶部汇总提醒；
   「登记本次检查」会把最近检查日期置为今天并解除高亮。
 * **复评强制校验**：长势为「衰弱」或「濒危」时，后续措施为必填项，未填写无法保存。
-* **措施回写**：复壮措施状态改为「已完成」时，若实施日期晚于古树现有最近复壮日期，则自动回写该日期。
+* **措施日期重算**：古树的最近复壮日期是**当前有效值**，始终等于本株现存「已完成」措施的最晚实施日期。措施新增、编辑（含改挂古树）、状态在「计划 / 实施中 / 已完成」间流转或删除后，都在同一 IndexedDB 事务内就地重算；没有已完成措施时回到「未登记」。同一天多条已完成措施只取同一天，互不顶掉；仅修改材料 / 负责人等不改变计算结果的编辑不会更新该字段。古树档案页、措施台账、复评页与养护总览 CSV 导出均读取该字段，看到的是同一个数。
